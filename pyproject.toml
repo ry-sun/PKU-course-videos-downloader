@@ -7,14 +7,16 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27.0",
     "playwright>=1.45.0",
+    "textual>=0.89.1",
 ]
 
 [project.scripts]
 pku-video = "main:main"
+pku-video-tui = "tui_app:main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "pku_client", "tui_app"]

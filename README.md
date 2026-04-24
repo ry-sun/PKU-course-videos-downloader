@@ -15,7 +15,29 @@ uv run playwright install chromium
 brew install ffmpeg
 ```
 
-## Usage
+## TUI Usage
+
+Start the terminal UI:
+
+```bash
+uv run pku-video-tui
+```
+
+Workflow:
+
+1. Enter your PKU account and password.
+2. Press `Login / Refresh`.
+3. Choose a course from the left table.
+4. Choose a replay from the right table.
+5. Press `d` or double-select the replay to download.
+
+The app uses PKU's `校园卡用户` / IAAA login flow and stores browser session cookies under `.browser-profile/`. It does not write your password to project files.
+
+If IAAA asks for CAPTCHA, SMS, or OTP, use `Headful Login`, complete the challenge in the browser, then return to the TUI.
+
+Downloaded files are saved under `downloads/<course-name>/`.
+
+## CLI Usage
 
 Do not put your password in source files. Use environment variables or let the tool prompt for it:
 
