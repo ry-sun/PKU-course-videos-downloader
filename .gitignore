@@ -1,0 +1,7 @@
+.browser-profile/
+.env
+.venv/
+downloads/
+__pycache__/
+*.pyc
+*.egg-info/
