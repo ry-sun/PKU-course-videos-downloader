@@ -148,6 +148,8 @@ class PKUDownloaderApp(App):
         self.paused = False
         self.pause_event = asyncio.Event()
         self.pause_event.set()
+        self.scheduler_event = asyncio.Event()
+        self.scheduler_event.set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -363,6 +365,7 @@ class PKUDownloaderApp(App):
         self.refresh_replay_table()
         self.refresh_queue_table()
         self.restore_queue_cursor(key)
+        self.scheduler_event.set()
 
     def current_priority_key(self) -> str | None:
         focused = self.active_table
@@ -392,6 +395,7 @@ class PKUDownloaderApp(App):
         self.download_items.pop(key, None)
         self.refresh_replay_table()
         self.refresh_queue_table(preferred_row=max(0, index - 1))
+        self.scheduler_event.set()
 
     def refresh_queue_table(self, preferred_key: str | None = None, preferred_row: int | None = None) -> None:
         table = self.query_one("#queue_table", DataTable)
@@ -422,6 +426,16 @@ class PKUDownloaderApp(App):
                 row = max(0, min(table.cursor_row, len(self.selected_replay_keys) - 1))
             table.move_cursor(row=row)
 
+    def update_queue_item(self, item: DownloadItem) -> None:
+        table = self.query_one("#queue_table", DataTable)
+        try:
+            table.get_row_index(item.key)
+        except Exception:
+            self.refresh_queue_table(item.key)
+            return
+        table.update_cell(item.key, "status", item.status)
+        table.update_cell(item.key, "progress", self.progress_text(item.progress))
+
     def restore_queue_cursor(self, key: str) -> None:
         if key in self.selected_replay_keys:
             self.query_one("#queue_table", DataTable).move_cursor(row=self.selected_replay_keys.index(key))
@@ -438,64 +452,66 @@ class PKUDownloaderApp(App):
             workers = self.worker_count()
             self.set_status(f"Resolving media for {len(self.selected_replay_keys)} selected replay(s)...")
             queue = [self.download_items[key] for key in self.selected_replay_keys if key in self.download_items]
-            resolved = []
-            for item in queue:
-                await self.pause_event.wait()
+            media_lock = asyncio.Lock()
+
+            async def run_one(item: DownloadItem) -> None:
+                await self.wait_for_item_slot(item, workers)
                 output_path = self.output_path_for(item.course, item.replay)
                 if output_path.exists():
                     item.saved_path = output_path
                     item.progress = 1.0
                     item.status = "Already downloaded"
-                    self.refresh_queue_table(item.key)
+                    self.update_queue_item(item)
                     self.update_overall_progress()
-                    continue
-                item.status = "Resolving media"
-                self.refresh_queue_table(item.key)
-                candidates, cookies = await self.client.collect_media(item.replay.url)
-                media = choose_media(candidates)
-                resolved.append((item, media.url, cookies))
-
-            semaphore = asyncio.Semaphore(workers)
-
-            async def run_one(item: DownloadItem, media_url: str, cookies: list[dict[str, str]]) -> None:
-                async with semaphore:
-                    await self.pause_event.wait()
-                    output_path = self.output_path_for(item.course, item.replay)
+                    self.scheduler_event.set()
+                    return
+                async with media_lock:
+                    await self.wait_for_item_slot(item, workers)
                     if output_path.exists():
                         item.saved_path = output_path
                         item.progress = 1.0
                         item.status = "Already downloaded"
-                        self.refresh_queue_table(item.key)
+                        self.update_queue_item(item)
                         self.update_overall_progress()
+                        self.scheduler_event.set()
                         return
-                    item.status = "Downloading"
-                    item.progress = 0.0
-                    self.refresh_queue_table(item.key)
+                    item.status = "Resolving media"
+                    self.update_queue_item(item)
+                    candidates, cookies = await self.client.collect_media(item.replay.url)
+                    media = choose_media(candidates)
 
-                    async def update_progress(fraction: float | None, message: str) -> None:
-                        if fraction is not None:
-                            item.progress = max(0.0, min(1.0, fraction))
+                await self.wait_for_item_slot(item, workers)
+                item.status = "Downloading"
+                item.progress = 0.0
+                self.update_queue_item(item)
+
+                async def update_progress(fraction: float | None, message: str) -> None:
+                    if fraction is not None:
+                        item.progress = max(0.0, min(1.0, fraction))
+                    if self.item_has_slot(item, workers):
                         item.status = message
-                        self.refresh_queue_table(item.key)
-                        self.update_overall_progress()
-
-                    try:
-                        item.saved_path = await download_media(
-                            media_url,
-                            cookies,
-                            output_path,
-                            update_progress,
-                            pause_event=self.pause_event,
-                        )
-                        item.progress = 1.0
-                        item.status = "Done"
-                    except Exception as exc:
-                        item.status = f"Error: {exc}"
-                    self.refresh_queue_table(item.key)
-                    self.refresh_replay_table()
+                    self.update_queue_item(item)
                     self.update_overall_progress()
 
-            await asyncio.gather(*(run_one(*args) for args in resolved))
+                try:
+                    item.saved_path = await download_media(
+                        media.url,
+                        cookies,
+                        output_path,
+                        update_progress,
+                        pause_event=self.pause_event,
+                        wait_for_turn=lambda: self.wait_for_item_slot(item, workers),
+                    )
+                    item.progress = 1.0
+                    item.status = "Done"
+                except Exception as exc:
+                    item.status = f"Error: {exc}"
+                self.update_queue_item(item)
+                self.refresh_replay_table()
+                self.update_overall_progress()
+                self.scheduler_event.set()
+
+            await asyncio.gather(*(run_one(item) for item in queue))
             self.set_status("Downloads finished.")
         finally:
             self.downloading = False
@@ -516,6 +532,28 @@ class PKUDownloaderApp(App):
             return max(1, min(8, int(raw)))
         except ValueError:
             return 2
+
+    async def wait_for_item_slot(self, item: DownloadItem, workers: int) -> None:
+        while True:
+            await self.pause_event.wait()
+            if self.item_has_slot(item, workers):
+                return
+            if not self.is_terminal_status(item.status):
+                item.status = "Paused" if item.progress > 0 else "Waiting"
+                self.update_queue_item(item)
+            self.scheduler_event.clear()
+            await self.scheduler_event.wait()
+
+    def item_has_slot(self, item: DownloadItem, workers: int) -> bool:
+        runnable_keys = [
+            key
+            for key in self.selected_replay_keys
+            if key in self.download_items and not self.is_terminal_status(self.download_items[key].status)
+        ]
+        return item.key in runnable_keys[:workers]
+
+    def is_terminal_status(self, status: str) -> bool:
+        return status in {"Done", "Already downloaded"} or status.startswith("Error:")
 
     def progress_text(self, progress: float) -> str:
         width = 18

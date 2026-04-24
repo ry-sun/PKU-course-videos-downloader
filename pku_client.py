@@ -355,8 +355,10 @@ async def download_media(
     output_path: Path,
     progress: ProgressCallback | None = None,
     pause_event: asyncio.Event | None = None,
+    wait_for_turn: Callable[[], Awaitable[None]] | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(f"{output_path.stem}.tmp{output_path.suffix}")
     headers = media_headers(cookies, media_url)
     if ".m3u8" in media_url.lower():
         ffmpeg = shutil.which("ffmpeg")
@@ -375,7 +377,7 @@ async def download_media(
             "-progress",
             "pipe:1",
             "-nostats",
-            str(output_path.with_suffix(".mp4")),
+            str(tmp_path.with_suffix(".mp4")),
         ]
         proc = await asyncio.create_subprocess_exec(
             *command,
@@ -386,6 +388,8 @@ async def download_media(
         while True:
             if pause_event:
                 await pause_event.wait()
+            if wait_for_turn:
+                await wait_for_turn()
             raw = await proc.stdout.readline()
             if not raw:
                 break
@@ -400,21 +404,27 @@ async def download_media(
         code = await proc.wait()
         if code != 0:
             raise RuntimeError(f"ffmpeg exited with code {code}")
-        return output_path.with_suffix(".mp4")
+        tmp_result = tmp_path.with_suffix(".mp4")
+        final_path = output_path.with_suffix(".mp4")
+        tmp_result.replace(final_path)
+        return final_path
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=None, verify=False) as client:
         async with client.stream("GET", media_url, headers=headers) as response:
             response.raise_for_status()
             total = int(response.headers.get("content-length") or 0)
             done = 0
-            with output_path.open("wb") as handle:
+            with tmp_path.open("wb") as handle:
                 async for chunk in response.aiter_bytes():
                     if pause_event:
                         await pause_event.wait()
+                    if wait_for_turn:
+                        await wait_for_turn()
                     handle.write(chunk)
                     done += len(chunk)
                     if progress:
                         await maybe_await(progress(done / total if total else None, f"{done / 1024 / 1024:.1f} MiB"))
     if progress:
         await maybe_await(progress(1.0, "Done"))
+    tmp_path.replace(output_path)
     return output_path
