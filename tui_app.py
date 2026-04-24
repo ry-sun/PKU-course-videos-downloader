@@ -461,9 +461,7 @@ class PKUDownloaderApp(App):
                     item.saved_path = output_path
                     item.progress = 1.0
                     item.status = "Already downloaded"
-                    self.update_queue_item(item)
-                    self.update_overall_progress()
-                    self.scheduler_event.set()
+                    self.finish_queue_item(item)
                     return
                 async with media_lock:
                     await self.wait_for_item_slot(item, workers)
@@ -471,9 +469,7 @@ class PKUDownloaderApp(App):
                         item.saved_path = output_path
                         item.progress = 1.0
                         item.status = "Already downloaded"
-                        self.update_queue_item(item)
-                        self.update_overall_progress()
-                        self.scheduler_event.set()
+                        self.finish_queue_item(item)
                         return
                     item.status = "Resolving media"
                     self.update_queue_item(item)
@@ -489,7 +485,7 @@ class PKUDownloaderApp(App):
                     if fraction is not None:
                         item.progress = max(0.0, min(1.0, fraction))
                     if self.item_has_slot(item, workers):
-                        item.status = message
+                        item.status = "Finalizing" if message == "Done" else message
                     self.update_queue_item(item)
                     self.update_overall_progress()
 
@@ -504,6 +500,8 @@ class PKUDownloaderApp(App):
                     )
                     item.progress = 1.0
                     item.status = "Done"
+                    self.finish_queue_item(item)
+                    return
                 except Exception as exc:
                     item.status = f"Error: {exc}"
                 self.update_queue_item(item)
@@ -525,6 +523,22 @@ class PKUDownloaderApp(App):
             return
         value = sum(item.progress for item in items) / len(items)
         self.query_one("#overall_progress", ProgressBar).update(progress=value * 100)
+
+    def finish_queue_item(self, item: DownloadItem) -> None:
+        table = self.query_one("#queue_table", DataTable)
+        row = table.cursor_row
+        if item.key in self.selected_replay_keys:
+            completed_row = self.selected_replay_keys.index(item.key)
+            self.selected_replay_keys.remove(item.key)
+            if row > completed_row:
+                row -= 1
+            elif row == completed_row:
+                row = min(row, max(0, len(self.selected_replay_keys) - 1))
+        self.download_items.pop(item.key, None)
+        self.refresh_queue_table(preferred_row=row)
+        self.refresh_replay_table()
+        self.update_overall_progress()
+        self.scheduler_event.set()
 
     def worker_count(self) -> int:
         raw = self.query_one("#workers", Input).value.strip()
