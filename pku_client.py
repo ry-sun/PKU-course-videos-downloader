@@ -354,6 +354,7 @@ async def download_media(
     cookies: list[dict[str, str]],
     output_path: Path,
     progress: ProgressCallback | None = None,
+    pause_event: asyncio.Event | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     headers = media_headers(cookies, media_url)
@@ -383,6 +384,8 @@ async def download_media(
         )
         assert proc.stdout
         while True:
+            if pause_event:
+                await pause_event.wait()
             raw = await proc.stdout.readline()
             if not raw:
                 break
@@ -406,6 +409,8 @@ async def download_media(
             done = 0
             with output_path.open("wb") as handle:
                 async for chunk in response.aiter_bytes():
+                    if pause_event:
+                        await pause_event.wait()
                     handle.write(chunk)
                     done += len(chunk)
                     if progress:

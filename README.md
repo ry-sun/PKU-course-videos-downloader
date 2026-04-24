@@ -28,14 +28,28 @@ Workflow:
 1. Enter your PKU account and password.
 2. Press `Login / Refresh`.
 3. Choose a course from the left table.
-4. Choose a replay from the right table.
-5. Press `d` or double-select the replay to download.
+4. Use `space` to select one or more replays from the right table.
+5. Press `d` to download the selected queue.
 
 The app uses PKU's `校园卡用户` / IAAA login flow and stores browser session cookies under `.browser-profile/`. It does not write your password to project files.
 
-If IAAA asks for CAPTCHA, SMS, or OTP, use `Headful Login`, complete the challenge in the browser, then return to the TUI.
+Keys:
 
-Downloaded files are saved under `downloads/<course-name>/`.
+```text
+j/k       move down/up
+h/l       focus courses/replays
+1/2/3/4   focus login/courses/replays/queue
+space     open course, select/unselect replay, or remove queued item
+p/P       raise/lower selected replay priority
+a         pause/resume active downloads
+d         download selected replays
+r         refresh courses
+q         quit
+```
+
+Set the `Workers` input to control maximum concurrent downloads. Replay lists are cached per course while the app is open, so returning to a course does not reload its video list.
+
+Downloaded files are saved under `downloads/<course-name>/` as `course-teacher-time.mp4`. The replay table shows a done flag for files already present in the download folder and skips them when building the queue.
 
 ## CLI Usage
 
