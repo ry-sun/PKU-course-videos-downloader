@@ -5,7 +5,9 @@
 ![Textual](https://img.shields.io/badge/TUI-Textual-7b61ff)
 ![License](https://img.shields.io/badge/use-study%20only-orange)
 
-A small `uv` project for downloading PKU course replay videos from `https://course.pku.edu.cn/`.
+A small project for downloading PKU course replay videos from `https://course.pku.edu.cn/`.
+
+一个从北京大学课程网站下载课程回放视频的 TUI 工具。
 
 The main interface is a terminal UI that logs in through PKU `校园卡用户` / IAAA, lists your available courses, shows replay videos, and downloads selected items with queue priority and pause/resume support.
 
@@ -28,7 +30,6 @@ Do not upload, redistribute, publicly share, stream, broadcast, or otherwise spr
 - Supports `j/k/h/l` navigation and `1/2/3/4` panel switching.
 - Supports pause/resume and configurable parallel workers.
 - Tracks completed files in `downloads/` and avoids repeated downloads.
-- Writes active downloads as `*.tmp.mp4`, then renames to `*.mp4` only after completion.
 
 ## Setup
 
