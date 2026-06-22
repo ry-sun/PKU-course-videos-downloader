@@ -192,29 +192,191 @@ class PKUClient:
         page = self._page
         video_list_url = f"https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={course.id}&mode=view"
         await page.goto(video_list_url, wait_until="domcontentloaded", timeout=60_000)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=15_000)
-        except Exception:
-            pass
-        rows = await page.evaluate(
-            """
-            () => Array.from(document.querySelectorAll('tr')).map((tr) => {
-              const cells = Array.from(tr.querySelectorAll('th, td')).map((td) => td.innerText.trim());
-              const link = tr.querySelector('a[href*="playVideo.action"]');
-              return link ? {
-                cells,
-                href: link.href
-              } : null;
-            }).filter(Boolean)
-            """
-        )
         replays: list[Replay] = []
-        for row in rows:
-            cells = [cell for cell in row["cells"] if cell]
-            title = cells[0] if cells else "课程回放"
-            record_time = cells[1] if len(cells) > 1 else ""
-            teacher = cells[2] if len(cells) > 2 else ""
-            replays.append(Replay(title=title, record_time=record_time, teacher=teacher, url=row["href"]))
+        visited_pages: set[tuple[str, tuple[str, ...]]] = set()
+
+        while True:
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+            page_data = await page.evaluate(
+                """
+                () => {
+                  const rows = Array.from(document.querySelectorAll('tr')).map((tr) => {
+                    const cells = Array.from(tr.querySelectorAll('th, td')).map((td) => td.innerText.trim());
+                    const link = tr.querySelector('a[href*="playVideo.action"]');
+                    return link ? {
+                      cells,
+                      href: link.href
+                    } : null;
+                  }).filter(Boolean);
+
+                  const isDisabled = (element) => {
+                    const text = [element.className, element.getAttribute('aria-disabled')].join(' ').toLowerCase();
+                    return text.includes('disabled') || text.includes('true');
+                  };
+                  const anchors = Array.from(document.querySelectorAll('a[href]'))
+                    .filter((anchor) => !isDisabled(anchor))
+                    .map((anchor) => ({
+                      href: anchor.href,
+                      rawHref: anchor.getAttribute('href') || '',
+                      text: anchor.innerText.trim(),
+                      signal: [
+                        anchor.getAttribute('href'),
+                        anchor.getAttribute('onclick'),
+                        anchor.className,
+                        anchor.parentElement ? anchor.parentElement.className : '',
+                        anchor.parentElement ? anchor.parentElement.innerText : ''
+                      ].filter(Boolean).join(' ')
+                    }));
+
+                  const currentStartIndex = Number(new URL(window.location.href).searchParams.get('startIndex') || '0');
+                  const nextByStartIndex = anchors
+                    .filter((anchor) => anchor.href.includes('videoList.action'))
+                    .map((anchor) => ({
+                      ...anchor,
+                      startIndex: Number(new URL(anchor.href).searchParams.get('startIndex'))
+                    }))
+                    .filter((anchor) => Number.isFinite(anchor.startIndex) && anchor.startIndex > currentStartIndex)
+                    .sort((left, right) => left.startIndex - right.startIndex)[0];
+                  if (nextByStartIndex) {
+                    return { rows, nextUrl: nextByStartIndex.href };
+                  }
+
+                  const nextByText = anchors.find((anchor) => /^(下一页|下页|next|>|›|»)$|下一页|next/i.test(anchor.text));
+                  if (nextByText && nextByText.href.includes('videoList.action')) {
+                    return { rows, nextUrl: nextByText.href };
+                  }
+
+                  const currentPage = (() => {
+                    const params = new URL(window.location.href).searchParams;
+                    for (const key of ['page', 'pageNo', 'pageIndex', 'currentPage', 'pageNumber']) {
+                      const value = Number(params.get(key));
+                      if (Number.isFinite(value) && value > 0) {
+                        return value;
+                      }
+                    }
+                    const active = document.querySelector('.active, .current, strong, b');
+                    const activePage = active ? Number(active.textContent.trim()) : NaN;
+                    return Number.isFinite(activePage) && activePage > 0 ? activePage : 1;
+                  })();
+
+                  const nextByNumber = anchors
+                    .map((anchor) => ({ ...anchor, page: Number(anchor.text) }))
+                    .filter((anchor) => (
+                      Number.isFinite(anchor.page)
+                      && anchor.page > currentPage
+                      && /page|paging|pagination|page_nav|页/i.test(anchor.signal)
+                    ))
+                    .sort((left, right) => left.page - right.page)[0];
+                  if (nextByNumber && nextByNumber.href.includes('videoList.action')) {
+                    return { rows, nextUrl: nextByNumber.href };
+                  }
+                  return { rows, nextUrl: null, hasNextControl: Boolean(nextByText || nextByNumber) };
+                }
+                """
+            )
+            rows = page_data["rows"]
+            page_key = (page.url, tuple(row["href"] for row in rows))
+            if page_key in visited_pages:
+                break
+            visited_pages.add(page_key)
+
+            for row in rows:
+                cells = [cell for cell in row["cells"] if cell]
+                title = cells[0] if cells else "课程回放"
+                record_time = cells[1] if len(cells) > 1 else ""
+                teacher = cells[2] if len(cells) > 2 else ""
+                replays.append(Replay(title=title, record_time=record_time, teacher=teacher, url=row["href"]))
+
+            next_url = page_data["nextUrl"]
+            if next_url:
+                await page.goto(next_url, wait_until="domcontentloaded", timeout=60_000)
+                continue
+
+            if page_data.get("hasNextControl"):
+                clicked = await page.evaluate(
+                    """
+                    () => {
+                      const clickReplayListNextPage = true;
+                      const isDisabled = (element) => {
+                        const text = [
+                          element.className,
+                          element.getAttribute('aria-disabled'),
+                          element.getAttribute('disabled')
+                        ].join(' ').toLowerCase();
+                        return text.includes('disabled') || text.includes('true');
+                      };
+                      const controlText = (element) => [
+                        element.innerText,
+                        element.value,
+                        element.title,
+                        element.getAttribute('aria-label')
+                      ].filter(Boolean).join(' ').trim();
+                      const controls = Array.from(document.querySelectorAll('a, button, input[type="button"], input[type="submit"]'))
+                        .filter((element) => !isDisabled(element))
+                        .map((element) => ({
+                          element,
+                          text: controlText(element),
+                          signal: [
+                            element.getAttribute('href'),
+                            element.getAttribute('onclick'),
+                            element.id,
+                            element.name,
+                            element.className,
+                            element.parentElement ? element.parentElement.className : '',
+                            element.parentElement ? element.parentElement.innerText : ''
+                          ].filter(Boolean).join(' ')
+                        }));
+
+                      const nextByText = controls.find((control) => /^(下一页|下页|next|>|›|»)$|下一页|next/i.test(control.text));
+                      if (nextByText) {
+                        nextByText.element.click();
+                        return true;
+                      }
+
+                      const currentPage = (() => {
+                        const params = new URL(window.location.href).searchParams;
+                        for (const key of ['page', 'pageNo', 'pageIndex', 'currentPage', 'pageNumber']) {
+                          const value = Number(params.get(key));
+                          if (Number.isFinite(value) && value > 0) {
+                            return value;
+                          }
+                        }
+                        const active = document.querySelector('.active, .current, strong, b');
+                        const activePage = active ? Number(active.textContent.trim()) : NaN;
+                        return Number.isFinite(activePage) && activePage > 0 ? activePage : 1;
+                      })();
+
+                      const nextByNumber = controls
+                        .map((control) => ({ ...control, page: Number(control.text) }))
+                        .filter((control) => (
+                          Number.isFinite(control.page)
+                          && control.page > currentPage
+                          && /page|paging|pagination|page_nav|页/i.test(control.signal)
+                        ))
+                        .sort((left, right) => left.page - right.page)[0];
+                      if (nextByNumber) {
+                        nextByNumber.element.click();
+                        return true;
+                      }
+                      return false;
+                    }
+                    """
+                )
+                if clicked:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15_000)
+                    except Exception:
+                        pass
+                    try:
+                        await page.wait_for_timeout(500)
+                    except AttributeError:
+                        pass
+                    continue
+
+            break
         return replays
 
     async def collect_media(self, url: str) -> tuple[list[MediaCandidate], list[dict[str, str]]]:
